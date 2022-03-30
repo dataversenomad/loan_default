@@ -1,0 +1,784 @@
+---
+title: "**Modelo analítico: Predicción de Fuga de Clientes**"
+author: "Jaime Paz"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::downcute:
+    self_contained: true
+    default_style: "light"
+    downcute_theme: "default"
+
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+---
+
+<center><img
+src="https://cdn.corporatefinanceinstitute.com/assets/debt-default.jpeg"
+width="1000" 
+height="200">
+</center>
+
+
+## **Contexto del negocio**
+
+En este problema, se nos ha presentado una base de datos de 78,829 registros donde se encuentra información de una empresa colombiana que otorga créditos. Esta corresponde a una base de datos histórica durante los últimos 30 meses. 
+
+El negocio desea estimar un modelo predictivo que permita estimar la probabilidad de fuga de cada cliente para la cartera de créditos proporcionada. El objetivo es crear un modelo de aprendizaje automático que permita clasificar dicha fuga de clientes para cada registro.
+
+Un modelo de predicción de fuga permitirá a la empresa colombiana, el poder monetizar la predicción obtenida y estimar una posible perdida monetaria en la cartera de créditos. Adicional a esto, se pretende estimar cuales son las variables que mueven esta predicción, de tal manera que el negocio podrá enfocarse en dichos factores con el fin de **reducir la perdida en la cartera de crédito**.
+
+Posterior al diseño del modelo predictivo, la empresa colombiana esta interesada en segmentar a dichos clientes de acuerdo a probabilidad de fuga, y esto permitirá generar campañas de marketing para fortalecer la relación con los clientes, en la cartera de crédito presente.
+
+## **Fuente de datos**
+
+Se nos ha proporcionado una hoja de datos de excel (formato CSV) el cual tiene el nombre: Base de Datos Modelo.csv (raw data)
+
+## **Herramientas utilizadas**
+
+Se utilizará el lenguaje de programación Python, ya que este cuenta con una amplia gama de paquetes que facilitan la exploración de datos. Adicional a esto, también consta de paquetes (Scikit-Learn) enfocados en machine learning, y para este caso se ponen en marcha algoritmos de clasificación (aprendizaje supervisado).
+
+## **1.0.  Importando paquetes**
+
+First we load reticulate package to write Python / R code in our Markdown enviroment:
+
+```{r packages_r}
+library(reticulate)
+Sys.setenv(RETICULATE_PYTHON = "/usr/local/bin/python3.7")
+```
+
+```{python packages_py}
+import pandas as pd              # paquete para data wrangling y exploracion
+import numpy as np               # packate de algebra lineal
+import seaborn as sns            # interfaz grafica de Python
+import matplotlib.pyplot as plt  # interfaz grafica de Python
+# adicionales:
+import copy
+import warnings
+warnings.filterwarnings('ignore')
+# paquete para aplicar clustering:
+from sklearn.cluster import KMeans
+```
+
+```{python}
+pd.set_option('display.max_columns', 35)
+pd.options.display.float_format = '{:.2f}'.format
+```
+
+## **2.0.  Carga de datos**
+
+```{python}
+df = pd.read_excel('/home/analytics/R/Projects/Python/Projects/genesis/Base de Datos Modelo.xlsx')
+df.head()
+```
+Despliegue de dimension:
+
+```{python}
+print(df.shape)
+```
+Tipos de datos cargados:
+
+```{python}
+df.info()
+```
+Despliegue de variables numericas
+
+```{python}
+df.describe() #variables numericas
+```
+No existen duplicados en los datos:
+
+```{python}
+df[df.duplicated()] #no existen datos duplicados:
+```
+
+## **3.0.  Data wrangling / Limpieza de datos**
+
+#### **EXPLORACION DE VARIABLES CATEGORICAS**
+
+TIPO DE CREDITO:
+
+```{python}
+df['TIPO DE CREDITO'] = df['TIPO DE CREDITO'].str.replace('[^A-Za-z0-9]+', '', regex=True)
+100 * df['TIPO DE CREDITO'].value_counts() / df.shape[0]
+```
+Se puede ver que la mayoría de tipos de crédito corresponde a A, C y V. Como buena práctica (y no perjudicar los modelos analitos) agruparemos las demás categorías como "Otros"
+
+```{python}
+def mapper(x):
+    if x in ['A', 'C', 'V']:
+        return x
+    else:
+        return 'Other'
+      
+df['TIPO DE CREDITO'] = df['TIPO DE CREDITO'].map(mapper)
+df['TIPO DE CREDITO'].value_counts()
+
+```
+SEXO
+
+```{python}
+#SEXO
+df['SEXO'].value_counts()
+# tenemos un valor en donde no se especifica el sexo:
+```
+
+```{python}
+df['SEXO'] = df['SEXO'].str.replace('[^A-Za-z0-9]+', 'invalido', regex=True)
+```
+ETAPA 
+
+```{python}
+df['ETAPA'].value_counts()
+```
+ESTADO
+
+```{python}
+
+df['ESTADO'].value_counts()
+to_dummy = ['ETAPA', 'SEXO', 'TIPO DE CREDITO']
+df['ESTADO'] = ['1' if x == "Cliente Retirado" else '0' for x in df['ESTADO'] ]
+```
+
+```{python}
+class NANS:
+    def __init__(self, data):
+        self._data = data
+        
+    def tot_nan(self):
+        nulls_v = self._data.isnull().sum(axis = 1) >= 1
+        #self._data['NA Flag'] = nulls_v.rename('NA Flag')
+        df = pd.DataFrame((self._data.isna().sum())).reset_index().\
+        merge( (100 * (self._data.isna().sum()) / self._data.shape[0]).round(3).\
+        reset_index(), on = 'index').rename(columns = {'index': 'Feature', '0_x': 'Count', '0_y':'%'}).\
+        sort_values( by = ['%'], ascending = False)
+        df = df.merge(pd.DataFrame(self._data.dtypes).reset_index().rename(\
+        columns = {'index':'Feature', 0:'Var Type'}), on = 'Feature')
+        return df.reset_index().drop(["index"], axis=1)
+
+```
+
+```{python}
+nulls_df = NANS(df)
+nulls_df.tot_nan() 
+# NO TENEMOS VALORES NULOS:
+```
+
+```{python}
+class features:
+    
+    def __init__(self, data_f):
+        self._df = data_f
+    def select_if(self, x):
+        if x == 'is.numeric':
+            return self._df[self._df.select_dtypes(include = 'number' ).columns]
+        elif x == 'is.character':
+            return self._df[self._df.select_dtypes(exclude = 'number' ).columns]
+        else:
+            raise ValueError('Invalid value. Please provide: "is.numeric" or "is.character" only')
+```
+
+```{python}
+# distribucion de features
+feats = features(df)
+num_feats = feats.select_if('is.numeric')
+cat_feats = feats.select_if('is.character')
+# guardamos el dataframe en nueva variable: train
+import copy
+
+train = copy.deepcopy(df)
+```
+
+## **4.0.  Analisis Exploratorio de Datos (EDA)**
+
+#### **Exploracion de variables numericas: (boxplots)**
+
+```{python}
+fig = plt.figure(figsize=(20,20))
+
+for index, item in enumerate(num_feats.columns, 1):
+    plt.subplot(4, 3, index)
+    sns.boxplot(y=train[item], x= train['ESTADO'] , hue= train['ESTADO'],
+                  linewidth=2.5)
+    plt.legend()
+    
+
+plt.show() 
+
+```
+
+#### **Exploracion de variables numericas: (densities)**
+
+```{python}
+fig = plt.figure(figsize=(20,20))
+
+for index, item in enumerate(num_feats.columns, 1):
+    plt.subplot(4, 3, index)
+    sns.distplot(train[train.ESTADO == '1'][item], color="red", hist = False,  kde=True, norm_hist=True)
+    sns.distplot(train[train.ESTADO == '0'][item], color="blue", hist = False,  kde=True, norm_hist=True)
+    plt.legend(labels=['Si','No'], title = 'Fuga??')
+
+plt.show() 
+```
+
+#### **Exploracion de variables numericas: (cummulative densities)**
+
+```{python}
+fig = plt.figure(figsize=(20,20))
+
+for index, item in enumerate(num_feats.columns, 1):
+    plt.subplot(4, 3, index)
+    sns.kdeplot(train[train.ESTADO == '1'][item], color="red", cumulative = True)
+    sns.kdeplot(train[train.ESTADO == '0'][item], color="blue", cumulative = True)
+    plt.legend(labels=['Yes','No'], title = 'Fuga?')
+
+plt.show() 
+```
+
+#### **EXPLORACION DE CORRELACION: VARIABLES NUMERICAS**
+
+```{python}
+num_feats.corr()
+```
+```{python}
+f, ax = plt.subplots(figsize = (18,18))
+sns.heatmap(num_feats.corr(), annot = True, linewidths=0.5, fmt = '.1f', ax = ax)
+plt.show()
+```
+
+Se observa una correlación muy fuerte (0.8) entre CAPITAL_CONCEDIDO y SALDO_CAPITAL, esto se tendrá en consideración durante el desarrollo del modelo. Por otro lado, CODIGO_PRESTAMO y CODIGO_PRESTAMO no aportan valor al modelo, y se puede ver que están altamente correlacionadas.
+
+#### **EXPLORACION DE VARIABLES CATEGORICAS**
+
+```{python}
+def plot_cat(cats = to_dummy, a = 1, b = 1, c = 1 ):
+    fig = plt.figure(figsize=(15,20))
+    for i in cats:   
+        grouped_df = train[['ESTADO', i ]] .groupby(['ESTADO', i]).size().to_frame('Percent')
+        grouped_df['Percent'] = (grouped_df['Percent'] * 100 / sum(grouped_df['Percent'])).round(0)
+        grouped_df = grouped_df.reset_index()
+   
+        plt.subplot(a, b, c)
+        plt.title('{}, subplot: {}{}{}'.format(i, a, b, c))
+        plt.xlabel(i)
+        sns.barplot(x=i, y = 'Percent', hue='ESTADO', data=grouped_df)
+        plt.legend(title = 'Fuga = 1')
+        c = c + 1
+    plt.show()
+```
+
+```{python}
+plot_cat(cats = to_dummy, a = 2, b = 2, c = 1)
+```
+
+
+## **4.1.  INSIGHTS ENCONTRADOS**
+
+**1.** Tanto la variable CODIGO CLIENTE y CODIGO PRESTAMO no son significativas en el modelo, puesto que solamente corresponde a IDs únicos o llaves por cada cliente.
+
+**2.** Dentro de la variable REGION se pueden encontrar un grupo de 0 – 5, se puede distinguir un grupo significativo de clientes que se dan a la fuga. No parece existir fuga persistente entre la región 16 y 30, sin embargo, se observan muchos valores atípicos arriba de 30 (tanto para clientes leales como clientes fugados) 
+
+**3.** Para la variable AGENCIA, existe sesgo a la derecha de clientes con fuga positiva, especialmente para los casos arriba 200. ¿Por qué la fidelidad de clientes no es muy remarcada en esta zona? Convendría investigar este hecho. 
+
+**4.** Conviene revisar los clientes fugados entre PRODUCTO = 20 a PRODUCTO = 30, ya que en dicha región no existen registros de clientes fieles a nuestra marca. 
+
+**5.** La mayor parte de créditos se concentra dentro de la TASA NOMINAL 40 y 50. Esto, para ambos grupos de fuga y no fuga.
+
+**6.** La mayor preferencia respecto al CAPITAL CONCEDIDO se encuentra debajo de Q. 20,000; la cual afecta de manera significativa a ambos grupos fuga y no fuga. 
+
+**7.** La mayor parte del SALDO CAPITAL se mantiene debajo de Q5,000. Sin embargo, existe una diferencia significativa y pronunciada para aquellos que tienen a fugarse entre 0 y Q.4,000.
+
+**8.** De acuerdo al histórico de CREDITOS ANTERIORES, la mayoría de clientes mantiene estos debajo de 5.
+
+**9.** Existe una mayor presencia (60% de clientes no fugados y 30% fugados) en aquellos créditos cuya ETAPA es M1. Las etapas M2 y M3 no sobrepasan en 5% de casos, pero cabe destacar que solo se han registrado fuga de clientes en la categoría M3 (no existen clientes fieles).
+
+**10.** La mayor parte de créditos se otorga a personas de sexo femenino y en general, las mujeres tienen a ser más fieles a nuestra marca, comparado con los hombres. Existe mayor oportunidad de negocio en los clientes con crédito TIPO A, registrando un total de 32% de casos, que son fieles a nuestra marca.
+
+
+## **5.0.  FEATURE ENGINEERING / DATA PREPARATION**
+
+De acuerdo a nuestro EDA, eliminamos variables que no aportan valor al modelo de prediccion de fuga. Por el momento, eliminamos CODIGO CLIENTE y CODIGO PRESTAMO
+
+```{python}
+train.drop(['CODIGO CLIENTE', 'CODIGO PRESTAMO'], axis = 1, inplace = True)
+train.head()
+```
+
+Para un modelo de regresión logística (como se ve más adelante), se requiere que las variables o features no posean mucha varianza (como se pudo ver en el EDA existe muchas de ellas con variables atípicos). Para esto se procede suavizar las variables mediante la aplicación de un logaritmo natural, así como también la normalización estándar.
+
+```{python}
+feats = features(train)
+num_feats = feats.select_if('is.numeric')
+
+for column in num_feats:
+    try:
+        train[column] = np.log1p(train[column]) 
+    except (ValueError, AttributeError):
+        pass
+
+train.head()
+```
+#### **CODIFICACION DE VARIABLES CATEGORICAS A DUMMY**
+
+```{python}
+dummies = pd.get_dummies(train[cat_feats.columns], drop_first = True)
+train_dummies = pd.concat([train, dummies], axis = 1)
+train_dummies.drop(cat_feats.columns, axis = 1, inplace = True)
+```
+
+```{python}
+train_dummies.head()
+```
+
+#### **NORMALIZACION DE VARIABLES NUMERICAS**
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+columns_std = num_feats.columns
+train_dummies[columns_std] = scaler.fit_transform(train_dummies[columns_std])
+```
+
+```{python}
+X = train_dummies.drop('ESTADO_1', axis=1)
+y = train_dummies['ESTADO_1']
+```
+
+## **6.0.  CONSTRUCCION DE MODELOS**
+
+Training / Testing Split (75% para train y 25% para validation)
+
+```{python}
+from sklearn.model_selection import train_test_split
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.25, random_state=42)
+```
+
+CHEQUEO DE VARIABLE TARGET (DATOS BALANCEADOS O IMBALANCEADOS)
+
+```{python}
+100 * y_train.value_counts() / len(y_train)
+```
+
+Podemos confirmar que nuestros datos estan imbalanceados, por lo que necesitaremos el ajuste de class_weight para dar mayor peso a la categoria minoritaria (fuga de cliente, que equivale a 1).
+
+## **6.1.  REGRESION LOGISTICA (SIN REGULARIZACION)**
+
+```{python}
+from sklearn.metrics import classification_report, roc_auc_score, f1_score, precision_score, recall_score, auc, precision_recall_curve, roc_curve, confusion_matrix, make_scorer
+from sklearn.metrics import precision_recall_fscore_support
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, RepeatedStratifiedKFold
+```
+
+#### **NOTA: EL SIGUIENTE SET DE CODIGO NO SE EJECUTA, YA QUE ANTERIORMENTE SE HA PROCEDIDO A REALIZAR UN GRIDSEARCH PARA CONFIGURACION DE HIPERPRAMETROS. EL OBJETO GRIDSEARCH FUE GUARDADO EN UN ARCHIVO QUE POSTERIORMENTE SE HA CARGADO**
+
+```{python}
+## 1. Creacion de objeto log_reg y aplicar metodo LogisticRegression:
+
+#log_reg = LogisticRegression()
+
+## 2. Configuracion de solvers y weight class (tratar con clases imbalanceadas)
+
+#solvers = ['newton-cg', 'lbfgs', 'liblinear', 'lbfgs'] # escoger el mejor solver
+
+#weights = [{0:x, 1:1.0-x} for x in np.linspace(0.0,0.99,100)] # pesos
+
+## 3. Almacenar hiperparametros en diccionario:
+
+#param_grid = dict(solver = solvers, 
+ #                 class_weight = weights)
+
+## 4. Seleccionamos metricas para estimar accuracy: Precision, Recall y F1 Score
+
+#scorers = {
+#    'precision_score': make_scorer(precision_score),
+#    'recall_score': make_scorer(recall_score),
+#    'f1_score':     make_scorer(f1_score)
+#}
+
+## 5. HYPER PARAMETER TUNNING
+
+#gridsearch = GridSearchCV(estimator= log_reg, 
+#                          param_grid= param_grid,
+#                          cv=StratifiedKFold(n_splits = 10), 
+#                          n_jobs=-1, 
+#                          scoring=scorers,
+#                          refit= 'f1_score',   #we focus on the F1 metric to display the better results
+#                          return_train_score=True,
+#                          verbose=2).fit(X_train.values, y_train.values)
+```
+Fitting 10 folds for each of 400 candidates, totalling 4000 fits
+
+
+```{python}
+import dill
+# Save the file
+#dill.dump(gridsearch, file = open("/home/analytics/R/Projects/Python/Projects/genesis/gridsearch.pickle", "wb"))
+# Reload the file
+gridsearch = dill.load(open("/home/analytics/R/Projects/Python/Projects/genesis/gridsearch.pickle", "rb"))
+
+```
+
+Despliegue de resultados: Logistic Regression:
+
+```{python}
+y_pred = gridsearch.predict(X_test.values)
+print('Best params for F1 score')
+print(gridsearch.best_params_) # mejores parametros escogidos para solver y class_weight (segun metrica F1)
+```
+
+CONFUSION MATRIX
+
+```{python}
+def conf_matrix(y_test, log_reg_pred):    
+    
+    # Creating a confusion matrix
+    con_mat = confusion_matrix(y_true=y_test, y_pred=log_reg_pred)
+    con_mat = pd.DataFrame(con_mat, range(2), range(2))
+   
+    #Ploting the confusion matrix
+    plt.figure(figsize=(6,6))
+    sns.set(font_scale=1.5) 
+    sns.heatmap(con_mat, annot=True, annot_kws={"size": 16}, fmt='g', cmap='Blues', cbar=False)
+    # axis labels
+    plt.xlabel('Predictions')
+    plt.ylabel('Actuals')
+    title = 'Confusion Matrix'.upper()
+    plt.title(title, loc='center')
+```
+
+```{python}
+conf_matrix(y_test, y_pred)
+plt.show()
+```
+
+
+
+Se puede observar que todavía existe espacio para mejora. Para los casos actuales de fuga, los valores pronosticados contienen 5,829 casos correctos, pero 1,689 casos incorrectos.
+Y para los casos donde los clientes son fieles (no fuga), se tiene un error de 1,394
+
+
+REPORTE PRECISION AND RECALL:
+
+```{python}
+precision_recall_fscore_support(y_test, y_pred, average='macro')
+# PRECION, RECALL, F1: 
+```
+
+**PRECISION:** El falso positivo es un caso problemático para la institución colombiana. Ya que si un cliente que se encontraba en estado NO fugado y se ha pronosticado que SI se ha fugado, puede que incurra en problemas internos en ofrecer campañas innecesarias. Sin embargo, esto no es tan CRITICO como el falso negativo.
+
+**RECALL:** Hace énfasis en capturar los POSITIVOS REALES y también da prioridad al falso negativo. Para la institución colombiana, es MUY CRITICO indicar que un cliente el cual se encontraba en ESTADO FUGADO, se ha pronosticado como un cliente no fugado. Esto representa una perdida monetaria a la institución, ya que esta dejando de monitorear aquellos casos positivos (fuga) y esto incurre en un costo para ella.
+
+
+```{python}
+def plot_precision_recall_vs_threshold(precisions, recalls, thresholds):
+
+    plt.figure(figsize=(8, 8))
+    plt.title("Precision  / Recall Scores (decision threshold)")
+    plt.plot(thresholds, precisions[:-1], "b--", label="Precision")
+    plt.plot(thresholds, recalls[:-1], "g-", label="Recall")
+    plt.ylabel("Score")
+    plt.xlabel("Decision Threshold")
+    plt.legend(loc='best')
+```
+
+```{python}
+y_scores = gridsearch.predict_proba(X_test)[:, 1]
+p, r, thresholds = precision_recall_curve(y_test, y_scores)
+plot_precision_recall_vs_threshold(p, r, thresholds)
+plt.show()
+```
+Eligiendo un THRESHOLD O UMBRAL de aproximadamente 42% se obtiene un PRECISION y RECALL de aproximadamente 80%. Este umbral lo que indica, es que la probabilidad arriba de 42% se considera para el caso de un cliente FUGADO (1) y debajo de 42%, significa cliente NO FUGADO (0)
+
+Eligiendo un umbral por debajo de 42% se obtiene beneficio con el RECALL. Por ejemplo, a un THRESHOLD de 40% se alcanza un RECALL de aproximadamente 83%, pero esto a costa de reducir la PRECISION a 77% aproximadamente.
+
+
+## **6.2.  MODELO RANDOM FOREST**
+
+CONFIGURACION DE HIPERPARAMETROS
+
+```{python}
+from sklearn.ensemble import RandomForestClassifier
+
+# PARA EL ALGORITMO DE RANDOM FOREST, NO ES NECESARIO NORMALIZAR LAS VARIABLES 
+# NUMERICAS.
+
+dummies = pd.get_dummies(df[cat_feats.columns], drop_first = True)
+train_dummies = pd.concat([df, dummies], axis = 1)
+train_dummies.drop(cat_feats.columns, axis = 1, inplace = True)
+
+X = train_dummies.drop(['ESTADO_1', 'CODIGO CLIENTE', 'CODIGO PRESTAMO'], axis=1)
+y = train_dummies['ESTADO_1']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.25, random_state=42)
+```
+
+
+```{python}
+## 1. Creacion de objeto rand_forest y aplicar metodo RandomForestClassifier:
+
+#rand_forest = RandomForestClassifier(class_weight = {0: 0.35000000000000003, 1: 0.6499999999999999}, max_depth = 20)
+
+## 2. Numero de arboles a crecer:
+
+#n_estimators = [int(x) for x in np.linspace(start = 100, stop = 500, num = 21)]
+
+## 3. Nivel maximo en cada arbol
+
+#max_depth = [int(x) for x in np.linspace(10, 25 , num = 12)]
+
+#random_grid = {'n_estimators': n_estimators }
+
+## 4. Seleccionamos metricas para estimar accuracy: Precision, Recall y F1 Score
+
+#scorers = {
+#    'precision_score': make_scorer(precision_score),
+#    'recall_score': make_scorer(recall_score),
+#    'f1_score':     make_scorer(f1_score)
+#}
+
+## 5. HYPER PARAMETER TUNNING
+
+#gridsearch = GridSearchCV(estimator= rand_forest, 
+ #                         param_grid= random_grid,
+  #                        cv=StratifiedKFold(n_splits = 10), 
+   #                       n_jobs=-1, 
+    #                      scoring=scorers,
+     #                     refit= 'f1_score',   #we focus on the F1 metric to display the better results
+      #                    return_train_score=True,
+      #                    verbose=2).fit(X_train.values, y_train.values)
+```
+
+
+```{python}
+## GUARDAR MODELO
+
+import dill
+
+# Save the file
+#dill.dump(gridsearch, file = open("/home/analytics/R/Projects/Python/Projects/genesis/gridsearch_3.pickle", "wb"))
+
+# Reload the file
+gridsearch = dill.load(open("/home/analytics/R/Projects/Python/Projects/genesis/gridsearch_3.pickle", "rb"))
+```
+
+```{python}
+y_pred = gridsearch.predict(X_test.values)
+print('Best params for F1 score')
+print(gridsearch.best_params_) # mejores parametros escogidos 
+
+```
+
+RECALIBRANDO EL MODELO
+
+```{python}
+random_forest = RandomForestClassifier(class_weight = {0: 0.35000000000000003, 1: 0.6499999999999999}, max_depth = 20, n_estimators= 300, random_state = 123)
+                                       
+random_forest.fit(X_train, y_train)
+y_pred = random_forest.predict(X_test.values)
+```
+
+```{python}
+conf_matrix(y_test, y_pred)
+plt.show()
+```
+
+
+
+```{python}
+precision_recall_fscore_support(y_test, y_pred, average='macro')
+# PRECION, RECALL, F1: 
+```
+
+```{python}
+y_scores = random_forest.predict_proba(X_test)[:, 1]
+p, r, thresholds = precision_recall_curve(y_test, y_scores)
+plot_precision_recall_vs_threshold(p, r, thresholds)
+plt.show()
+```
+
+```{python}
+results = pd.DataFrame({'precision': p[:-1], 'recall': r[:-1], 'th':thresholds }, columns=['precision', 'recall', 'th'])
+results[(results.th >= 0.55) & (results.th <= 0.60) ]
+
+```
+
+
+El modelo muestra una mejora respecto al equilibrio entre la PRECISION Y RECALL, empleando un THRESHOLD de aproximadamente 58%. La gran ventaja de este modelo es que podemos lograr obtener un RECALL de 85%, empleando un THRESHOLD de 70% y sumado a esto, NO ponemos en riesgo de la PRECISION, ya que esta queda a un nivel de 80%.
+
+El THRESHOLD optimo seleccionado sera:
+
+precision = 0.89, recall = 0.85, threshold = 0.62
+
+
+**- Dado los dos modelos anteriores, el modelo de Random Forest sobre pasa en performance al modelo de Regresión Logística. Se pudo observar que es posible seleccionar un threshold de tal manera de no impactar en la PRECISION y el RECALL, considerando que esta última es crítica para un modelo de fuga.**
+
+**- En términos de interpretabilidad, el modelo de regresión logística es más comprensible el poder explicarlo a una audiencia sin conocimientos técnicos y matemáticos.  El algoritmo de random forest consta de una estructura de árboles de decisión, y debido a la complejidad matemática, puede ser difícil destapar la caja negra.**
+
+**- Una desventaja de la regresión logística es que la relación de las variables predictoras y el predictor (fuga) debe ser lineal. Convendría hacer un estudio, del poder incluir variables adicionales que puedan mejorar su performance. Sin embargo, si lo que se requiere es precisión, se recomienda utilizar el modelo de random forest.**
+
+
+
+## **7.0.  IMPORTANCIA DE VARIABLES**
+
+Para evaluar la importancia de variables, recurrimos a la métrica de Gini o la mejora de impureza (promedio):
+
+```{python}
+random_forest.fit(X_train, y_train)
+std = np.std([tree.feature_importances_ for tree in random_forest.estimators_], axis=0)
+importances = random_forest.feature_importances_
+forest_importances = pd.Series(importances, index = X_train.columns)
+fig, ax = plt.subplots()
+forest_importances.plot.barh(yerr=std, ax=ax)
+ax.set_title("Importancia de variables")
+ax.set_ylabel("Mejora en nivel de impureza (media) - Gini")
+plt.show()
+```
+
+Como se puede observar, las variables “CREDITOS ANTERIORES” y “SALDO CAPITAL” son las variables mas relevantes en el sistema de predicción de fuga de clientes. El “CAPITAL CONCEDIDO” queda en tercer lugar.
+
+
+
+## **8.0.  PREDICCION DE DATOS (HOJA DE CALCULO TEST)**
+
+CARGA DE DATOS
+
+```{python}
+test_df = pd.read_excel('/home/analytics/R/Projects/Python/Projects/genesis/Base de Datos Predicción.xlsx')
+```
+CONVERSION DE VARIABLES EN NUEVO DATAFRAME:
+
+```{python}
+test_df['TIPO DE CREDITO'] = test_df['TIPO DE CREDITO'].str.replace('[^A-Za-z0-9]+', '', regex=True)
+test_df['TIPO DE CREDITO'] = test_df['TIPO DE CREDITO'].map(mapper)
+test_df['SEXO'] = test_df['SEXO'].str.replace('[^A-Za-z0-9]+', 'invalido', regex=True)
+```
+
+
+```{python}
+vars_valid = ['TIPO DE CREDITO', 'SEXO', 'ETAPA']
+dummies = pd.get_dummies(test_df[vars_valid], drop_first = True)
+val_dummies = pd.concat([test_df, dummies], axis = 1)
+val_dummies.drop(vars_valid, axis = 1, inplace = True)
+X_val = val_dummies.drop(['CODIGO CLIENTE', 'CODIGO PRESTAMO'], axis=1)
+```
+
+```{python}
+X_val.drop(['Probabilidad Fuga', 'Predicción '], axis = 1, inplace = True)
+```
+
+```{python}
+X_val['SEXO_invalido'] = "0"
+X_val.SEXO_invalido = X_val.SEXO_invalido.astype('uint8')
+```
+
+PREDICCION DE ESTADO:
+
+```{python}
+y_pred_val = random_forest.predict(X_val.values)
+```
+
+PREDICCION DE PROBABILIDADES:
+
+```{python}
+y_scores_val = random_forest.predict_proba(X_val)[:, 1]
+```
+
+```{python}
+output = pd.read_excel('/home/analytics/R/Projects/Python/Projects/genesis/Base de Datos Predicción.xlsx')
+output['Probabilidad Fuga'] = y_scores_val
+output['Predicción '] = ['Cliente Retirado' if x >= 0.62 else 'Cliente Renovado' for x in output['Probabilidad Fuga']  ]
+```
+EXPORTANDO EL ARCHIVO
+
+```{python}
+import pandas as pd
+import openpyxl
+#output.to_excel('/home/analytics/R/Projects/Python/Projects/genesis/Base de Datos Modelo (salida).xlsx', sheet_name='salida')
+
+```
+
+## **8.0.  ANALISIS DE CLUSTERING**
+
+Con las 3 variables de importancia que fueron obtenidos con el algoritmo de Random Forest, se procede a seleccionar las variables: 'CAPITAL_CONCEDIDO', 'SALDO_CAPITAL', 'CREDITOS ANTERIORES' y 'Probabilidad de Fuga'. Posteriormente se puede a tratar de construir un modelo de segmentación utilizando K-Means Clustering:
+
+Carga de datos:
+
+```{python}
+cluster = dill.load(open("/home/analytics/R/Projects/Python/Projects/genesis/cluster.pickle", "rb"))
+
+cluster_new = cluster.drop(['CODIGO CLIENTE', 'ETAPA_M2', 
+                        'AGENCIA', 'SUBPRODUCTO', 'REGION', 'PRODUCTO', 'TASA_NOMINAL',
+                        'ETAPA_M3', 'SEXO_M', 'TIPO DE CREDITO_Other', 'TIPO DE CREDITO_C', 
+                        'SEXO_invalido', 'TIPO DE CREDITO_V'], axis = 1).values
+
+X = StandardScaler().fit_transform(cluster_new)
+
+
+```
+CONSTRUCCION DE OBJETO KMEANS:
+
+```{python}
+from sklearn.cluster import KMeans
+wcss = []
+
+for i in range(1,11):
+    kmeans = KMeans(n_clusters= i, max_iter = 300, 
+                    init='k-means++', random_state=123, 
+                    algorithm='auto')
+    kmeans.fit(X)
+    wcss.append(kmeans.inertia_)
+```
+
+DESPLIEGUE: ELBOW METHOD:
+
+```{python}
+plt.legend('')
+plt.plot(range(1,11), wcss)
+plt.title('Elbow Method')
+plt.xlabel('No. of clusters')
+plt.ylabel('wcss')
+plt.show() 
+
+
+```
+
+
+```{python}
+kmeans_model = KMeans(n_clusters= 4, max_iter = 300, 
+                    init='k-means++', random_state=123, 
+                    verbose = 0, algorithm='auto')
+cluster['y_pred'] = kmeans_model.fit_predict(X) 
+```
+
+De acuerdo con los resultados, seleccionamos 2 clusters de clientes (region apartir de donde los errores ya no caen drasticamente)
+
+REDUCCION DE VARIABLES MEDIANTE PCA:
+
+```{python}
+from sklearn.decomposition import PCA
+
+pca = PCA(n_components = 2)
+pca_fuga = pca.fit_transform(cluster)
+pca_fuga_df = pd.DataFrame(data = pca_fuga, columns = ['Componente_1', 'Componente_2'])
+pca_nombres_fuga = pd.concat([pca_fuga_df, cluster[['y_pred']]], axis = 1)
+```
+
+```{python}
+plt.figure(figsize=(10,6))
+
+plot_clusters = sns.scatterplot(x=pca_nombres_fuga.Componente_1, 
+                y=pca_nombres_fuga.Componente_2, hue=pca_nombres_fuga.y_pred,
+                palette='Set1', s=100, alpha=0.2,  
+                data=pca_nombres_fuga).set_title('KMeans Clusters (4)', fontsize=15)
+
+
+plt.show()
+```
+
+Luego de analizar todas las variables proporcionadas, no fue posible encontrar una región muy remarcada que permita separar a los clientes utilizando el método de K-Means. Convendría analizar a futuro otro método que permita lograr una separación más eficiente.
+
+
